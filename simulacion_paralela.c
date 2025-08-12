@@ -127,7 +127,27 @@ void init_semaforos(Interseccion *I,
     I->semaforos[1].timer  = duracion_fase(&I->semaforos[1]);
 }
 
+int add_vehicle(Interseccion *I, int lane, int pos) {
+    if (I->numVehiculos >= I->capVehiculos) return -1;
+    int id = I->numVehiculos;
+    I->vehiculos[id] = (Vehiculo){ .id=id, .lane=lane, .pos=pos };
+    I->numVehiculos++;
 
+    int k = idx(lane, pos, I->L);
+    if (I->occ[k] == -1) {
+        I->occ[k] = id;
+    } else {
+        // buscar siguiente celda libre hacia adelante (simple)
+        int p = pos, vueltas = 0;
+        while (I->occ[idx(lane, p, I->L)] != -1) {
+            p = (p + 1) % I->L;
+            if (++vueltas > I->L) break; // carril lleno
+        }
+        I->vehiculos[id].pos = p;
+        I->occ[idx(lane, p, I->L)] = id;
+    }
+    return id;
+}
 
 /* Distribuye N vehículos sin choques (round robin por carril y posición) */
 void init_vehiculos_round_robin(Interseccion *I, int N) {
@@ -141,5 +161,78 @@ void init_vehiculos_round_robin(Interseccion *I, int N) {
 }
 
 
+/* ---------- Lógica de vehículos (PARALELA) ---------- */
+static inline int hay_alto_en(const Interseccion *I, int lane, int pos) {
+    // [0]=N→S, [1]=E→W
+    for (int i = 0; i < 2; ++i) {
+        const Semaforo *s = &I->semaforos[i];
+        if (s->laneGroup == lane && s->pos == pos) {
+            return s->estado != GREEN; // alto si no está en verde
+        }
+    }
+    return 0;
+}
 
+void move_vehicles_parallel(Interseccion *I) {
+    int total = I->numCarriles * I->L;
+
+    int *next_occ = (int*)malloc(sizeof(int) * (size_t)total);
+    for (int k = 0; k < total; ++k) next_occ[k] = -1;
+
+    // Un lock por celda para reclamar destinos sin carreras
+    omp_lock_t *locks = (omp_lock_t*)malloc(sizeof(omp_lock_t) * (size_t)total);
+    for (int k = 0; k < total; ++k) omp_init_lock(&locks[k]);
+
+    // 1) Decidir y reservar destino en paralelo
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int id = 0; id < I->numVehiculos; ++id) {
+        Vehiculo *v = &I->vehiculos[id];
+        int cur = v->pos;
+        int nxt = (cur + 1) % I->L;
+
+        // Solo lecturas de I->occ e I->semaforos
+        int ocupado = I->occ[idx(v->lane, nxt, I->L)] != -1;
+        int alto    = hay_alto_en(I, v->lane, nxt);
+
+        int dest = (ocupado || alto) ? cur : nxt;
+        int k    = idx(v->lane, dest, I->L);
+
+        // Resolver conflictos: gana el id menor
+        omp_set_lock(&locks[k]);
+        if (next_occ[k] == -1 || id < next_occ[k]) next_occ[k] = id;
+        omp_unset_lock(&locks[k]);
+    }
+
+    // 2) Aplicar movimientos (puede ser paralelo)
+    #pragma omp parallel for schedule(static)
+    for (int k = 0; k < total; ++k) {
+        int id = next_occ[k];
+        I->occ[k] = id;
+        if (id != -1) {
+            int lane = k / I->L;
+            int pos  = k % I->L;
+            I->vehiculos[id].lane = lane;
+            I->vehiculos[id].pos  = pos;
+        }
+    }
+
+    for (int k = 0; k < total; ++k) omp_destroy_lock(&locks[k]);
+    free(locks);
+    free(next_occ);
+}
+
+/* ---------- Impresión ---------- */
+void print_estado(const Interseccion *I, int iter) {
+    printf("Iteración %d\n", iter);
+    for (int i = 0; i < I->numVehiculos; ++i) {
+        printf("Vehículo %d - Lane:%d Pos:%d\n",
+               I->vehiculos[i].id, I->vehiculos[i].lane, I->vehiculos[i].pos);
+    }
+    for (int j = 0; j < 2; ++j) {
+        printf("Semáforo %d (laneGroup=%d pos=%d) - Estado:%d Timer:%d\n",
+               I->semaforos[j].id, I->semaforos[j].laneGroup, I->semaforos[j].pos,
+               I->semaforos[j].estado, I->semaforos[j].timer);
+    }
+    puts("");
+}
 
