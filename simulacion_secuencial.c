@@ -208,7 +208,7 @@ int main(void) {
     // Parámetros de demo (ajústalos si quieres)
     const int L = 5;              // largo del carril
     const int numCarriles = 2;    // 0=N→S, 1=E→W
-    const int N = 20;             // vehículos
+    const int N = 6;             // vehículos
     const int T = 8;              // iteraciones de simulación
 
     // Semáforos: posiciones y tiempos de fase
