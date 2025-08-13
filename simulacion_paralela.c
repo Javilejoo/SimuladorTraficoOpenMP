@@ -1,34 +1,3 @@
-#include <omp.h>
-
-enum { RED=0, GREEN=1, YELLOW=2 };
-
-typedef struct {
-    int id;
-    int pos;
-    int lane; // 0 = Norte a Sur, 1 = Este a Oeste
-} Vehiculo;
-
-typedef struct {
-    int id;
-    int estado;
-    int laneGroup; // 0 = Norte a Sur, 1 = Este a Oeste
-    int timer, R, Y, G;
-    int pos;  // posicion del "alto"
-} Semaforo;
-
-typedef struct {
-    int id;
-    int L;
-    int numCarriles;
-    int *occ; // ocupacion  -1 libre, id de vehículo si ocupado (idx = lane*L + pos)
-
-    Vehiculo * vehiculos;
-    int numVehiculos;
-    int capVehiculos;
-
-    Semaforo semaforos[2];  // [0]=NS, [1]=EW
-} Interseccion;
-
 // simulacion_paralela.c
 #include <stdio.h>
 #include <stdlib.h>
@@ -160,6 +129,23 @@ void init_vehiculos_round_robin(Interseccion *I, int N) {
     }
 }
 
+/* ---------- Lógica de semáforos (PARALELA) ---------- */
+void update_traffic_lights_parallel(Semaforo *L, int n) {
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
+        if (L[i].R <= 0) L[i].R = 1;
+        if (L[i].G <= 0) L[i].G = 1;
+        if (L[i].Y <= 0) L[i].Y = 1;
+
+        L[i].timer--;
+        if (L[i].timer <= 0) {
+            if (L[i].estado == RED)       L[i].estado = GREEN;
+            else if (L[i].estado == GREEN) L[i].estado = YELLOW;
+            else                           L[i].estado = RED;
+            L[i].timer = duracion_fase(&L[i]);
+        }
+    }
+}
 
 /* ---------- Lógica de vehículos (PARALELA) ---------- */
 static inline int hay_alto_en(const Interseccion *I, int lane, int pos) {
@@ -236,3 +222,41 @@ void print_estado(const Interseccion *I, int iter) {
     puts("");
 }
 
+/* ---------- Bucle principal (PARALELO) ---------- */
+int main(void) {
+    // Parámetros (ajusta N/L para ver movimiento)
+    const int L = 5;
+    const int numCarriles = 2;
+    const int N = 6;  // menor que capacidad (=2*5=10) para que haya huecos
+    const int T = 8;
+
+    // Semáforos
+    const int posNS = 0;
+    const int posEW = 3;
+    const int R = 2, G = 2, Y = 1;
+    const int estadoNS_ini = GREEN;
+    const int estadoEW_ini = YELLOW;
+
+    Interseccion I;
+    init_interseccion(&I, 0, L, numCarriles, N);
+    init_semaforos(&I, posNS, posEW, R, G, Y, estadoNS_ini, estadoEW_ini);
+    init_vehiculos_round_robin(&I, N);
+
+    // Demo: imprime estado inicial
+    print_estado(&I, 0);
+
+    // Permitir ajuste dinámico de hilos (opcional)
+    omp_set_dynamic(1);
+
+    for (int t = 1; t <= T; ++t) {
+        // (Opcional) ajustar hilos según carga:
+        // omp_set_num_threads( (I.numVehiculos/10) + 1 );
+
+        update_traffic_lights_parallel(I.semaforos, 2);
+        move_vehicles_parallel(&I);
+        print_estado(&I, t);
+    }
+
+    destroy_interseccion(&I);
+    return 0;
+}
